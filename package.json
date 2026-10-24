@@ -1,0 +1,12 @@
+{
+  "name": "salon-temps-reel",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "start npm run dev --prefix server && start npm run dev --prefix client",
+    "start": "start npm run start --prefix server && start npm run dev --prefix client",
+    "server:dev": "npm run dev --prefix server",
+    "server:start": "npm run start --prefix server",
+    "client:dev": "npm run dev --prefix client"
+  }
+}
