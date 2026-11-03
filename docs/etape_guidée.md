@@ -1,5 +1,7 @@
 # Rapport d'Analyse et de Choix Techniques — Séance 1
 
+> Document historique de la séance 1. Il décrit la v0 et ses choix, pas l'implémentation v1.
+
 ## Étape 1 — Caractériser chaque besoin
 
 | Besoin | Sens des échanges | Fréquence | Latence tolérée | Perte tolérée | Données |

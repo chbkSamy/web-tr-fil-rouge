@@ -1,21 +1,45 @@
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick } from 'vue';
-import { useChat } from '../composables/useChat.js';
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
+import { useWebSocket } from '../composables/useWebSocket.js';
 
 const {
   messages,
   status,
-  statusLabel,
-  init,
+  author,
+  closeCode,
+  closeReason,
+  errorMessage,
+  connect,
+  disconnect,
   sendMessage,
-  disconnectSSE,
-} = useChat();
+} = useWebSocket();
 
-const author = ref('');
+const authorInput = ref('');
 const text = ref('');
-const sendError = ref('');
-const isSending = ref(false);
 const messagesEl = ref(null);
+
+const isBusy = computed(() => status.value === 'connecting');
+const isIdentified = computed(() => status.value === 'identified');
+const canConnect = computed(() => authorInput.value.trim().length > 0);
+const canSend = computed(() => isIdentified.value && text.value.trim().length > 0);
+const statusClass = computed(() => (status.value === 'closed' ? 'error' : status.value));
+
+const statusLabel = computed(() => {
+  switch (status.value) {
+    case 'connecting':
+      return 'Connexion...';
+    case 'open':
+      return 'Identification...';
+    case 'identified':
+      return `En ligne (${author.value})`;
+    case 'closed':
+      return closeCode.value === 1000 ? 'Déconnecté' : `Déconnecté (${closeCode.value})`;
+    case 'error':
+      return 'Erreur de connexion';
+    default:
+      return 'Hors ligne';
+  }
+});
 
 async function scrollToBottom() {
   await nextTick();
@@ -24,27 +48,20 @@ async function scrollToBottom() {
   }
 }
 
-async function handleSendMessage() {
-  const authorValue = author.value.trim();
-  const content = text.value.trim();
-  if (!authorValue || !content) return;
+function handleConnect() {
+  if (!canConnect.value) return;
+  connect(authorInput.value);
+}
 
-  isSending.value = true;
-  sendError.value = '';
-  try {
-    await sendMessage(authorValue, content);
-    text.value = '';
-  } catch (err) {
-    sendError.value = err.message;
-  } finally {
-    isSending.value = false;
-  }
+function handleSend() {
+  if (!canSend.value) return;
+  if (sendMessage(text.value)) text.value = '';
 }
 
 function onKeydown(event) {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
-    handleSendMessage();
+    handleSend();
   }
 }
 
@@ -52,12 +69,10 @@ function formatTime(iso) {
   return new Date(iso).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
 }
 
-onMounted(() => {
-  init(scrollToBottom);
-});
+watch(() => messages.value.length, scrollToBottom);
 
 onUnmounted(() => {
-  disconnectSSE();
+  disconnect();
 });
 </script>
 
@@ -67,10 +82,10 @@ onUnmounted(() => {
       <header class="header">
         <div class="header-title">
           <h1>Salon temps réel</h1>
-          <span class="version-tag">v0</span>
+          <span class="version-tag">v1</span>
         </div>
 
-        <div id="connection-status" class="status-indicator" :class="status">
+        <div id="connection-status" class="status-indicator" :class="statusClass">
           <span class="status-dot"></span>
           <span>{{ statusLabel }}</span>
         </div>
@@ -78,7 +93,7 @@ onUnmounted(() => {
 
       <main ref="messagesEl" id="messages-list" class="messages-list" aria-live="polite">
         <div v-if="messages.length === 0" class="empty-state">
-          Aucun message pour l'instant.
+          {{ isIdentified ? 'Aucun message pour l’instant.' : 'Connecte-toi pour discuter.' }}
         </div>
 
         <article
@@ -95,36 +110,63 @@ onUnmounted(() => {
       </main>
 
       <footer class="composer">
-        <p v-if="sendError" class="error-text" role="alert">
-          {{ sendError }}
+        <p v-if="errorMessage" class="error-text" role="alert">
+          {{ errorMessage }}
+        </p>
+
+        <p v-if="status === 'closed'" class="connection-detail">
+          Code de fermeture : {{ closeCode }}
+          <span v-if="closeReason"> — {{ closeReason }}</span>
         </p>
 
         <div class="composer-row">
           <input
             id="input-author"
-            v-model="author"
+            v-model="authorInput"
             type="text"
             class="input composer-author"
             placeholder="Auteur"
             autocomplete="off"
-            :disabled="isSending"
+            maxlength="32"
+            :disabled="isIdentified || isBusy"
+            @keydown.enter.prevent="handleConnect"
           />
 
+          <button
+            v-if="isIdentified"
+            id="btn-disconnect"
+            class="btn btn-secondary"
+            @click="disconnect"
+          >
+            Se déconnecter
+          </button>
+          <button
+            v-else
+            id="btn-connect"
+            class="btn btn-primary"
+            :disabled="!canConnect || isBusy"
+            @click="handleConnect"
+          >
+            {{ isBusy ? 'Connexion...' : 'Se connecter' }}
+          </button>
+        </div>
+
+        <div class="composer-row">
           <input
             id="input-text"
             v-model="text"
             type="text"
             class="input composer-input"
             placeholder="Message..."
-            :disabled="isSending"
+            :disabled="!isIdentified"
             @keydown="onKeydown"
           />
 
           <button
             id="btn-send"
             class="btn btn-primary"
-            :disabled="isSending || !author.trim() || !text.trim()"
-            @click="handleSendMessage"
+            :disabled="!canSend"
+            @click="handleSend"
           >
             Envoyer
           </button>
@@ -191,10 +233,14 @@ onUnmounted(() => {
   border-radius: 50%;
 }
 
+.status-indicator.idle { color: #94a3b8; }
+.status-indicator.idle .status-dot { background: #94a3b8; }
 .status-indicator.connecting { color: #f59e0b; }
 .status-indicator.connecting .status-dot { background: #f59e0b; }
-.status-indicator.open { color: #10b981; }
-.status-indicator.open .status-dot { background: #10b981; }
+.status-indicator.open { color: #f59e0b; }
+.status-indicator.open .status-dot { background: #f59e0b; }
+.status-indicator.identified { color: #10b981; }
+.status-indicator.identified .status-dot { background: #10b981; }
 .status-indicator.error { color: #ef4444; }
 .status-indicator.error .status-dot { background: #ef4444; }
 
@@ -251,6 +297,9 @@ onUnmounted(() => {
   background: #1a1d27;
   border: 1px solid #2e3346;
   border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
 .composer-row {
@@ -268,6 +317,9 @@ onUnmounted(() => {
 }
 .input:focus {
   border-color: #6366f1;
+}
+.input:disabled {
+  opacity: 0.6;
 }
 
 .composer-author {
@@ -291,6 +343,11 @@ onUnmounted(() => {
   color: #ffffff;
 }
 
+.btn-secondary {
+  background: #334155;
+  color: #e2e8f0;
+}
+
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -299,7 +356,11 @@ onUnmounted(() => {
 .error-text {
   color: #ef4444;
   font-size: 0.8rem;
-  margin-bottom: 0.35rem;
+}
+
+.connection-detail {
+  color: #94a3b8;
+  font-size: 0.75rem;
 }
 
 @media (max-width: 600px) {

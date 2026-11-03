@@ -1,7 +1,7 @@
 {
   "name": "salon-temps-reel-client",
   "version": "0.1.0",
-  "description": "Client Vue.js du salon temps reel (v0)",
+  "description": "Client Vue.js du salon temps reel (v1)",
   "type": "module",
   "scripts": {
     "dev": "vite",

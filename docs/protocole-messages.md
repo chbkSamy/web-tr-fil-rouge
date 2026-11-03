@@ -1,5 +1,7 @@
 # Protocole WebSocket, v1
 
+> Les mentions de SSE, `EventSource`, `Last-Event-ID` et `/api/stream` décrivent uniquement la v0. Ces mécanismes sont supprimés en v1 : aucune route, aucun code client/serveur ni proxy SSE ne subsiste ; seules ces mentions historiques restent.
+
 
 ## Étape 1 : Inventorier les échanges de la v0
 
@@ -35,7 +37,7 @@ On utilise WebSocket, RFC 6455. Les trames sont du texte UTF-8. Chaque trame con
 - `maxPayload` : `16384` octets.
 - Pas de sous-protocole WebSocket en v1.
 - Les trames binaires sont refusées.
-- Le ping/pong est géré par `ws`. Ce n'est pas un message applicatif.
+- Le ping/pong est géré par `ws`. Ce n'est pas un message applicatif. Voir la politique de heartbeat en 4.6.3.
 
 Voici l'enveloppe commune.
 
@@ -119,7 +121,8 @@ Règles :
 - Le client n'ajoute pas son message localement. Il attend la diffusion. Ça évite les doublons.
 - L'ordre est celui du traitement serveur.
 - L'`id` strictement croissant servira à la reprise après coupure : un client pourra envoyer son dernier `id` reçu pour demander les messages manqués. La v1 ne l'implémente pas encore.
-- `id` repart à `1` après un redémarrage. C'est une limite de la v1.
+- En v1, le serveur ne conserve aucun historique et ne rejoue aucun message. À la reconnexion, le client repart d'une liste vide : les messages manqués pendant la coupure sont perdus.
+- `id` repart à `1` après un redémarrage. C'est une limite de la v1. Le client vide donc sa liste à chaque nouvelle connexion pour éviter des clés en double.
 
 ### 4.5 `server.error`
 
@@ -136,19 +139,21 @@ Règles :
 
 #### 4.6.1 Ordre côté serveur
 
-1. Trame texte obligatoire. Une trame binaire donne `BINARY_NOT_SUPPORTED` et fermeture `1003`.
+Le serveur applique exactement cet ordre. La première règle qui échoue produit la réponse indiquée et arrête le traitement.
+
+1. Trame binaire : `BINARY_NOT_SUPPORTED`, `fatal: true`, fermeture `1003`.
 2. Trame limitée à `maxPayload = 16384` octets. Au-delà, `ws` ferme avec `1009`. Le serveur peut envoyer `MESSAGE_TOO_LARGE` avant la fermeture, mais ce n'est pas garanti.
 3. JSON valide obligatoire. Sinon `INVALID_JSON`, `fatal: true`, fermeture `1007`.
 4. La racine doit être un objet simple, pas un tableau, pas `null`, pas une chaîne. Sinon `INVALID_ENVELOPE`, `fatal: true`, fermeture `1008`.
 5. `v` doit être présent, entier, et valoir `1`. Sinon `UNSUPPORTED_VERSION`, `fatal: true`, fermeture `4001`.
-6. `type` doit être une chaîne non vide. Type inconnu : `UNKNOWN_TYPE`, `fatal: false`, connexion ouverte.
-7. Un `server.*` envoyé par le client donne `FORBIDDEN_TYPE`, `fatal: true`, fermeture `1008`.
-8. `payload` doit être un objet. Sinon `INVALID_ENVELOPE`, `fatal: true`, fermeture `1008`.
-9. Connexion non identifiée : seul `client.hello` passe. Un type `client.*` connu autre que `client.hello` donne `NOT_IDENTIFIED`, `fatal: false`. Un type inconnu suit la règle 6. Un `server.*` suit la règle 7.
-10. Connexion déjà identifiée : un nouveau `client.hello` donne `ALREADY_IDENTIFIED`, `fatal: false`.
-11. Champs de la charge utile validés. Champ manquant, mauvais type ou valeur invalide : `INVALID_PAYLOAD`, `fatal: false`. Exception : `author` dans `client.hello`, voir règle 13.
-12. Texte trop long : `TEXT_TOO_LONG`, `fatal: false`.
-13. `author` invalide dans `client.hello` (absent, mauvais type, vide après trim, trop long ou avec caractère de contrôle) : `INVALID_AUTHOR`, `fatal: false`.
+6. `type` doit être une chaîne non vide. Absent, non chaîne ou vide : `INVALID_ENVELOPE`, `fatal: true`, fermeture `1008`.
+7. Un `server.*` envoyé par le client donne `FORBIDDEN_TYPE`, `fatal: true`, fermeture `1008`. Cette règle passe avant la recherche des types connus : `server.inconnu` donne donc `FORBIDDEN_TYPE`, pas `UNKNOWN_TYPE`.
+8. Type bien formé mais inconnu : `UNKNOWN_TYPE`, `fatal: false`, connexion ouverte.
+9. `payload` doit être un objet. Sinon `INVALID_ENVELOPE`, `fatal: true`, fermeture `1008`.
+10. Connexion non identifiée : seul `client.hello` passe. Un type `client.*` connu autre que `client.hello` donne `NOT_IDENTIFIED`, `fatal: false`. Cette règle passe avant la validation du payload.
+11. Connexion déjà identifiée : un nouveau `client.hello` donne `ALREADY_IDENTIFIED`, `fatal: false`. Cette règle passe avant la validation du payload.
+12. `client.hello` : `author` absent, mauvais type, vide après trim, trop long ou avec caractère de contrôle donne `INVALID_AUTHOR`, `fatal: false`. Le timer d'identification continue de tourner.
+13. `client.message.send` : champ manquant, mauvais type ou valeur invalide donne `INVALID_PAYLOAD`, `fatal: false`. Texte trop long : `TEXT_TOO_LONG`, `fatal: false`.
 14. Pas de `client.hello` sous 10 secondes : `IDENTIFICATION_TIMEOUT`, `fatal: true`, fermeture `4002`.
 
 #### 4.6.2 Règles générales
@@ -160,13 +165,24 @@ Règles :
 - Le client ignore les champs inconnus.
 - Le client qui reçoit un `server.*` inconnu l'ignore et garde la connexion.
 - Un champ optionnel ajouté plus tard ne doit pas casser un ancien client.
+- Toute erreur fatale envoie `server.error`, puis ferme avec `closeCode`. La raison de fermeture reste courte (le message complet est dans `server.error`).
+- À l'arrêt normal du serveur, les clients sont fermés avec `1001`, sans `server.error`.
+
+#### 4.6.3 Heartbeat transport
+
+- Le serveur envoie un ping de protocole toutes les 30 000 ms. Cette valeur est configurable côté serveur pour les tests.
+- Chaque connexion garde un état `isAlive`. Un pong remet `isAlive` à `true`.
+- À chaque tick : si `isAlive` est `false`, la connexion est considérée morte et terminée ; sinon le serveur passe `isAlive` à `false`, puis envoie un ping.
+- Une connexion morte est terminée sans `server.error`. Le client peut voir un code `1006`.
+- Le navigateur répond automatiquement aux ping. Un client Node.js peut désactiver cette réponse pour simuler une connexion morte.
+- Le heartbeat de protocole ne sert pas à mesurer la latence applicative : le navigateur ne rend pas les trames de contrôle au code JavaScript.
 
 ## Étape 5 : Erreurs et codes de fermeture
 
 | Code d'erreur | Cause | `fatal` | Fermeture | Action du client |
 | :--- | :--- | :--- | :--- | :--- |
 | `INVALID_JSON` | Texte non JSON. | oui | `1007` | Afficher l'erreur, pas de retry auto. |
-| `INVALID_ENVELOPE` | Racine non objet, `type` invalide ou `payload` non objet. | oui | `1008` | Corriger le client. |
+| `INVALID_ENVELOPE` | Racine non objet, `type` absent/non chaîne/vide, ou `payload` non objet. | oui | `1008` | Corriger le client. |
 | `UNSUPPORTED_VERSION` | `v` absent ou différent de `1`. | oui | `4001` | Mettre à jour le client ou signaler l'incompatibilité. |
 | `UNKNOWN_TYPE` | Type inconnu. | non | - | Ignorer et continuer. |
 | `FORBIDDEN_TYPE` | Le client envoie un `server.*`. | oui | `1008` | Corriger le client. |
@@ -189,6 +205,19 @@ Règles :
 - Erreur fatale : le serveur envoie `server.error`, puis ferme avec `closeCode`. Pour `1009` et `1003`, la fermeture peut arriver sans message.
 - Erreur non fatale : `server.error`, connexion ouverte.
 - En v1, le client ne se reconnecte pas tout seul. Il affiche l'état et laisse l'utilisateur relancer.
+- À l'arrêt du serveur, fermeture `1001` sans `server.error`. Une connexion morte détectée par le heartbeat est terminée sans message d'erreur.
+
+## Écarts constatés en v1
+
+L'implémentation a conduit aux ajustements suivants par rapport à la spécification initiale :
+
+- heartbeat ajouté avec ping/pong de protocole, seuil de deux ticks et fermeture sans `server.error` ;
+- arrêt normal du serveur avec fermeture `1001` ;
+- aucun historique et aucun rejeu des messages manqués ;
+- liste client vidée à chaque nouvelle connexion, car `id` repart à `1` après un redémarrage ;
+- priorité de `server.*` sur la recherche de type connu ;
+- `type` absent, non chaîne ou vide traité comme `INVALID_ENVELOPE`, pas comme `UNKNOWN_TYPE` ;
+- `MESSAGE_TOO_LARGE` reste best-effort : la fermeture `1009` peut arriver sans `server.error`.
 
 ## Étape 6 : Versionnage
 

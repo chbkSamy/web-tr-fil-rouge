@@ -1,14 +1,16 @@
 {
   "name": "salon-temps-reel-server",
   "version": "0.1.0",
-  "description": "Serveur SSE pour le salon temps reel (v0)",
+  "description": "Serveur WebSocket du salon temps reel (v1)",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "test": "node --test",
+    "check": "node scripts/ws-check.js"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "ws": "^8.22.0"
   }
 }
